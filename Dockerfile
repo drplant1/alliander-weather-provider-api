@@ -3,46 +3,56 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 
-# *** BASE IMAGE ***
-FROM rflinnenbank/wpla-eccodes-ubuntu:latest as base-image
+FROM python:3.10.13-bullseye AS base-image
 
-    # Copy the project requirements file to the proper location
-WORKDIR $PYSETUP_PATH
-COPY pyproject.toml ./
+RUN apt-get update &&  \
+    apt-get -y install libeccodes-dev &&  \
+    apt-get -y install libeccodes-tools &&  \
+    apt-get clean
 
-    # Install the runtime environment dependencies (The $POETRY_VIRTUALENVS_IN_PROJECT value ensures an environment)
-RUN poetry install --no-interaction --no-ansi -vvv --without dev
+ENV ECCODES_DIR=/usr/src/eccodes
+ENV ECMWFLIBS_ECCODES_DEFINITION_PATH=/usr/src/eccodes/share/eccodes/definitions
 
-WORKDIR /
-COPY ./weather_provider_api ./weather_provider_api
-COPY ./var_maps ./var_maps
-COPY ./pyproject.toml ./pyproject.toml
+ARG APP_HOME=/app
+RUN pip install poetry
 
-# *** DEV IMAGE ***
-# The purpose of this image is to supply the project as an interpreter / testing ground
-FROM base-image as dev-image
 
-    # Set working directory
-WORKDIR /
+# Setup WPLA user and switch to WPLA user
+ARG APP_USER=wpla-user
 
-# TODO: Add SSL interpreter interface
+RUN groupadd --system "$APP_USER" && \
+    useradd --system --gid "$APP_USER" --create-home --home "$APP_HOME" "$APP_USER"
 
-# *** GUNICORN IMAGE ***
-# The purpose of this image is to supply the project with a gunicorn-run API
-FROM base-image as uvicorn-image
+WORKDIR $APP_HOME
 
-WORKDIR /
+USER $APP_USER
 
+COPY --chown=$APP_USER:$APP_USER ./pyproject.toml ./pyproject.toml
+COPY --chown=$APP_USER:$APP_USER ./weather_provider_api ./weather_provider_api
+COPY --chown=$APP_USER:$APP_USER ./var_maps ./var_maps
+
+RUN poetry config virtualenvs.in-project true && \
+    poetry install --no-interaction --no-ansi -v --no-root
+
+ENV PATH="$APP_HOME/.venv/bin:$PATH"
+
+# --- DEV image --
+FROM base-image AS dev-image
+# TODO: Hookup SSH interface
+
+USER $APP_USER
+CMD ["ls", "-l"]
+
+# --- UVICORN image --
+FROM base-image AS uvicorn-image
+
+USER $APP_USER
 EXPOSE 8000
+CMD ["uvicorn", "--reload", "--host", "0.0.0.0", "--port", "8000", "weather_provider_api.core.application:WPLA_APPLICATION" ]
 
-CMD ["uvicorn", "--reload", "--host", "0.0.0.0", "--port", "8000", "weather_provider_api.main:app" ]
+# --- GUNICORN image --
+FROM base-image AS gunicorn-image
 
-# *** UVICORN IMAGE ***
-# The purpose of this image is to supply the project with a uvicorn-run API
-FROM base-image as gunicorn-image
-
-WORKDIR /
-
+USER $APP_USER
 EXPOSE 8000
-
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "weather_provider_api.main:app", "--timeout", "180"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "weather_provider_api.core.application:WPLA_APPLICATION", "--timeout", "180"]
